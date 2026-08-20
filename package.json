@@ -6,7 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "supabase test db",
+    "test:remote": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs test",
+    "db:reset:remote": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs reset",
+    "db:reset:noseed": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs reset:noseed",
+    "db:push:dry": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs push:dry"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

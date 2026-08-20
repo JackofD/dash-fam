@@ -15,8 +15,9 @@ Guiding principle: low friction beats feature depth. Adding a list item must tak
 ## Current state
 
 - **F-01 done** — Next.js app scaffolded at the repo root, CI green, auto-deploying to Vercel. Routes exist as stubs that render a marker.
-- **F-02 (schema) written but not merged** — the migration, `seed.sql`, and pgTAP RLS suite live on branch `worktree-f-02-schema` / draft PR #3 (also checked out at `.claude/worktrees/f-02-schema/`). The `supabase/` directory on `main` is still empty. Plan: `.plans/F-02-database-schema-rls-seed.md`.
-- **Supabase client wiring in progress** on `feature/f-02-supabase-setup-connection` — deps installed and the three `src/lib/supabase/*.ts` factories created.
+- **F-02 in progress** on `feature/f-02-supabase-setup-connection`, which now carries both halves: the schema (migration, `seed.sql`, pgTAP RLS suite, merged from `worktree-f-02-schema` / draft PR #3) and the connection wiring (three `src/lib/supabase/*.ts` factories, generated types, `src/middleware.ts`). Plans: `.plans/F-02-database-schema-rls-seed.md` and `.plans/F-02b-supabase-connection.md`.
+- **`src/middleware.ts` refreshes the session only.** No redirects — a logged-out visitor is not yet bounced anywhere. That logic is F-03's.
+- **`/debug/connection` is a temporary dev-only smoke page**, not part of the IA. It proves the round trip end to end and gets deleted in F-03.
 - **F-03 (auth) is next** and is where `src/middleware.ts`, the sign-in flow, and `/auth/callback` get their real logic. The stubs say "lands in F-03" — respect that boundary; don't opportunistically fill them in.
 
 ## Commands
@@ -28,7 +29,7 @@ npx tsc --noEmit       # typecheck
 npm run build          # production build (also the CI gate)
 ```
 
-CI (`.github/workflows/ci.yml`, on PRs) runs `npm run lint`, `npx tsc --noEmit`, `npm run build`. Keep all three green. There is **no `npm run test` script yet** — D-08's RLS + critical-path tests and their CI step arrive with F-02/F-03.
+CI (`.github/workflows/ci.yml`, on PRs) runs `npm run lint`, `npx tsc --noEmit`, `npm run build`. Keep all three green. The pgTAP RLS suite is **not** in CI — it needs a live database, so it stays a local gate (see Database below). Wiring D-08's tests into CI arrives with F-03.
 
 **Lint caveat:** `npm run lint` is bare `eslint`, which walks the whole tree including the nested git worktree at `.claude/worktrees/f-02-schema/`. Its generated `.next/types/` produces ~180 errors and ~3000 warnings that have nothing to do with your changes. To check your own work, scope it:
 
