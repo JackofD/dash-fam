@@ -4,18 +4,30 @@
 // always the one named by SUPABASE_TEST_DB_URL, never inherited CLI state.
 
 import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+const TYPES_FILE = 'src/lib/supabase/database.types.ts';
 
 const SUBCOMMANDS = {
-  test: (url) => ['test', 'db', '--db-url', url],
-  reset: (url) => ['db', 'reset', '--db-url', url, '--yes'],
-  'reset:noseed': (url) => ['db', 'reset', '--db-url', url, '--no-seed', '--yes'],
-  'push:dry': (url) => ['db', 'push', '--db-url', url, '--dry-run'],
+  test: { args: (url) => ['test', 'db', '--db-url', url] },
+  reset: { args: (url) => ['db', 'reset', '--db-url', url, '--yes'] },
+  'reset:noseed': {
+    args: (url) => ['db', 'reset', '--db-url', url, '--no-seed', '--yes'],
+  },
+  'push:dry': { args: (url) => ['db', 'push', '--db-url', url, '--dry-run'] },
+  // Regenerate the committed Database type from the live schema. Re-run this
+  // after every new migration, or the client generics silently describe the
+  // old shape.
+  'gen:types': {
+    args: (url) => ['gen', 'types', 'typescript', '--db-url', url, '--schema', 'public'],
+    outFile: TYPES_FILE,
+  },
 };
 
 const subcommand = process.argv[2];
-const args = SUBCOMMANDS[subcommand];
+const spec = SUBCOMMANDS[subcommand];
 
-if (!args) {
+if (!spec) {
   console.error(
     `Usage: node scripts/supabase-remote.mjs <${Object.keys(SUBCOMMANDS).join('|')}>`
   );
@@ -34,11 +46,35 @@ if (!dbUrl) {
 const target = dbUrl.replace(/:\/\/([^:]+):[^@]*@/, '://$1:****@');
 console.log(`[supabase-remote] target: ${target}`);
 
-const result = spawnSync('supabase', args(dbUrl), { stdio: 'inherit', shell: true });
+// Capture stdout only when we need to redirect it to a file; otherwise let the
+// CLI write straight through so its progress output stays live. stderr is
+// always inherited, so CLI diagnostics surface either way.
+const result = spawnSync('supabase', spec.args(dbUrl), {
+  stdio: spec.outFile ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+  shell: true,
+  encoding: 'utf8',
+});
 
 if (result.error) {
   console.error(`[supabase-remote] failed to spawn supabase CLI: ${result.error.message}`);
   process.exit(1);
 }
 
-process.exit(result.status ?? 1);
+if (result.status !== 0) {
+  process.exit(result.status ?? 1);
+}
+
+if (spec.outFile) {
+  // Only write on a clean exit — a partial or empty capture would otherwise
+  // clobber a good committed types file with something that doesn't compile.
+  if (!result.stdout || !result.stdout.trim()) {
+    console.error(
+      `[supabase-remote] ${subcommand} produced no output; leaving ${spec.outFile} untouched.`
+    );
+    process.exit(1);
+  }
+  writeFileSync(spec.outFile, result.stdout);
+  console.log(`[supabase-remote] wrote ${spec.outFile}`);
+}
+
+process.exit(0);

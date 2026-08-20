@@ -112,3 +112,13 @@ Phase 1 ships exactly `/`, `/lists`, `/lists/[listId]`, `/settings`, `/sign-in`,
 - **Each feature gets a plan** at `.plans/F-NN-slug.md` before implementation, stating scope, explicit out-of-scope, steps, files touched, verification, and definition of done. Read the plan for the feature you're working on; the out-of-scope section is binding.
 - **Branches** are `feature/f-NN-slug`, PR'd to `main`. Commits are conventional and feature-scoped: `feat(f-01): …`, `fix(f-01): …`, `chore: …`.
 - **Deploy early** (ADR-003, env-setup step 10): `main` → production, every branch → a preview. This is already wired; keep it that way.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

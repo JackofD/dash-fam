@@ -147,3 +147,12 @@ vite.config.ts.timestamp-*
 
 # windows crash dumps
 *.stackdump
+
+# Claude Code local state. worktrees/ are embedded git repos; skills/ is
+# vendored upstream Markdown (duplicated into .agents/ by the installer) and
+# is restored via skills-lock.json, which IS committed. A shared
+# .claude/settings.json stays committable — only the .local override is not.
+.claude/worktrees/
+.claude/skills/
+.claude/settings.local.json
+.agents/

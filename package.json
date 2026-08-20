@@ -11,7 +11,8 @@
     "test:remote": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs test",
     "db:reset:remote": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs reset",
     "db:reset:noseed": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs reset:noseed",
-    "db:push:dry": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs push:dry"
+    "db:push:dry": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs push:dry",
+    "db:types": "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs gen:types"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",
