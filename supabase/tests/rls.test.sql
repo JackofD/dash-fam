@@ -30,6 +30,13 @@ select plan(13);
 insert into public.households (id, name)
 values ('11111111-1111-1111-1111-111111111111', 'Test Household');
 
+-- auth.users row for the linked member below. members.user_id has an FK
+-- here, and every other auth.users column is nullable or defaulted. The
+-- address must match no seed invited_email so on_auth_user_created is a
+-- no-op for it.
+insert into auth.users (id, email)
+values ('11111111-1111-1111-1111-1111111111f1', 'linked-adult@test.invalid');
+
 -- Linked member: stands in for an adult who has signed in. Linking is done
 -- here by the table owner, exactly as the signup trigger would — never as a
 -- client write.
@@ -78,7 +85,7 @@ select is(
 );
 
 select is(
-  public.current_household_id(), null,
+  public.current_household_id(), null::uuid,
   'current_household_id() is null for a user with no member row'
 );
 
@@ -102,7 +109,7 @@ select throws_ok(
             '11111111-1111-1111-1111-1111111111f9',
             'Smuggled', '#E5484D')$$,
   '42501',
-  null,
+  null::text,
   'members_insert refuses a member that arrives already linked to a user'
 );
 
@@ -117,7 +124,7 @@ select throws_ok(
        set user_id = '11111111-1111-1111-1111-1111111111f9'
      where id = '11111111-1111-1111-1111-1111111111a1'$$,
   '42501',
-  null,
+  null::text,
   'members_update refuses a change to user_id'
 );
 
@@ -149,7 +156,7 @@ select is(
 
 reset role;
 
-select has_function('public', 'link_member_on_signup', 'signup linking function exists');
+select has_function('public', 'link_member_on_signup', 'signup linking function exists'::text);
 
 select * from finish();
 

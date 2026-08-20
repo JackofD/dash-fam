@@ -31,10 +31,17 @@ npx tsc --noEmit       # typecheck
 npm run build          # production build (also the CI gate)
 npm run test           # RLS + critical-path tests (added under D-08; see Testing)
 
-supabase start         # boot local Postgres/Auth/Realtime in Docker
+supabase start         # boot local Postgres/Auth/Realtime in Docker (needs Docker)
 supabase db reset      # rebuild local DB from migrations + seed.sql (repeatable)
 supabase migration new <name>   # create a new migration file
 supabase db push       # apply local migrations to the linked prod project
+
+# No Docker? A throwaway hosted dev project + --db-url works the same way (F-02,
+# project-docs/06-environment-setup.md §5.1). Needs SUPABASE_TEST_DB_URL in .env.local:
+npm run db:push:dry     # dry-run against the remote db (connectivity/credentials check)
+npm run db:reset:remote # migrations + seed.sql, from scratch, against the remote db
+npm run db:reset:noseed # same, without seed.sql
+npm run test:remote     # pgTAP suite against the remote db
 ```
 
 CI (on PRs) runs `npm run lint`, `npx tsc --noEmit`, `npm run build`, and the tests once they exist. Keep them all green.

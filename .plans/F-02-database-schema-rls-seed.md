@@ -1,120 +1,211 @@
-# F-02 — Database Schema, RLS & Seed Data
+# F-02 — Database schema, RLS, seed, and RLS tests
 
-> On approval, this plan lives at `.plans/F-02-database-schema-rls-seed.md` in the repo. Every other artifact this feature produces (the migration file, `seed.sql`, the RLS test) is created by executing the steps below against the **local Supabase Docker stack** — no production project is touched in this feature.
+Replaces the earlier F-02 plan and the F-02a addendum. Those assumed the Supabase CLI's
+local Docker stack was the execution target; this one commits to a **throwaway hosted
+Supabase dev project** instead, which changes the verification gate, the commands, and the
+secrets handling. Everything else — the schema itself, the policies, the seed — is unchanged.
 
-## Context
+## Goal
 
-Dash Fam is a private single-household PWA (shared lists, chores, calendar, meals) shipped in phases; Phase 1 is Foundation + Lists only. F-01 scaffolded the Next.js app, CI, and Vercel deploy. The `supabase/migrations/` and `src/lib/supabase/` folders currently exist only as `.gitkeep` placeholders — there is no schema, no local DB, and no seed.
+Phase-1 (Foundation + Lists) database: four tables, RLS as the security boundary, the
+signup-linking trigger, seed data for one household of five, and a pgTAP suite that proves
+the policies actually deny. Verified by executing all of it against a real Supabase Postgres.
 
-**F-02 builds the entire data foundation**: the four Phase-1 tables (`households`, `members`, `lists`, `list_items`), the `security definer` helper/trigger functions, Row-Level Security policies, Realtime enablement, and the five-member seed — delivered as a **single init migration** plus `seed.sql`, verified locally with `supabase db reset`.
+Out of scope: the production project, `supabase db push` to prod, SSR client factories and
+`src/middleware.ts` (F-03), non-RLS critical-path tests, and wiring tests into CI.
 
-**In scope:** local Supabase stack, the init migration, seed data, and one negative-case RLS test (D-08). **Out of scope (later features):** the three SSR Supabase client factories + `src/middleware.ts` (F-03 auth wiring), the query/action layer (ADR-005), any UI, and pushing to a prod project. The source of truth is `project-docs/01-schema-foundation-lists.md` (SQL, migration order §9, RLS §5, realtime §6, seed §7), with the `invited_email` column + signup trigger from `02-auth-flow.md` §3.1–3.2, and the deltas D-01/D-07/D-09 from `04-decisions-log.md`. **The decisions log overrides "Open items" in the schema doc** — so `sort_position` (not `position`) is authoritative.
+## Why hosted, not Docker
 
----
+Docker isn't installed on this machine, and the CLI's local stack is a fleet of containers
+(Postgres, GoTrue, Realtime, Storage, Kong, Studio). The schema and RLS tests need almost
+none of it — just Postgres with pgTAP, the `authenticated` role, `auth.users`, and
+`auth.uid()`.
 
-## Definition of Done (from env doc)
+Verified by probing the installed CLI (v2.115): `supabase db reset`, `supabase db push` and
+`supabase test db` all accept `--db-url` and connect straight to a Postgres over the wire
+with **no Docker in the path**. A free-tier throwaway project therefore gives us a real
+Supabase environment — real `auth` schema, real roles, real `supabase_realtime` publication
+— rather than a shim that would let a Supabase-specific defect through.
 
-Maps to env-doc checklist **steps 4–5**: `supabase init` + `supabase start` work locally, and the first migration written from the schema doc + decision deltas applies cleanly via `supabase db reset` together with the seed. Plus the D-08 negative RLS test passes. Prod link/push (env step 7) is deferred.
+Two consequences worth stating up front:
 
----
+- **`db reset --db-url` is the primary command, not `db push`.** `db reset` replays all
+  migrations *plus* `seed.sql` from scratch on every run (`--no-seed` to skip the seed).
+  `db push` instead records each applied version in `supabase_migrations.schema_migrations`,
+  so editing the init migration and re-pushing would be treated as already-applied and the
+  fix would silently not land. Since untested SQL needs a fix-and-rerun cycle, that
+  distinction is load-bearing. `db reset` also reproduces the gate this plan originally
+  specified — "migration and seed apply with zero errors" — just against a remote database.
+- **The dev project is disposable and is never production.** `db reset` is destructive by
+  design. The guard rails in step 3 exist because of that.
+
+## Current state
+
+The SQL is written and sits on branch `worktree-f-02-schema` / draft PR #3, checked against
+the Postgres grammar but **never executed**. Already in the repo:
+
+- `supabase/migrations/20260818150009_init_foundation_lists.sql` — `households`, `members`,
+  `lists`, `list_items`; `current_household_id()` and `link_member_on_signup()` as
+  `security definer … set search_path`; the `on_auth_user_created` trigger;
+  `list_items_set_household()`; RLS enabled on all four tables ahead of any policy;
+  per-operation policies to `authenticated` only; both `alter publication supabase_realtime`
+  statements; five indexes.
+- `supabase/seed.sql` — one household (fixed id), five members (`user_id` null throughout,
+  two adults with `invited_email`), one `grocery` list. Every insert
+  `on conflict (id) do nothing`.
+- `supabase/tests/rls.test.sql` — 13 pgTAP assertions with self-contained fixtures in their
+  own household, wrapped `begin … rollback`.
+
+So the remaining work is: fix the defects found by reading, build the remote runner, and
+then actually run it.
 
 ## Steps
 
-### 1. Initialise the local Supabase stack (env §5.1)
+### 1. Fix three real bugs in `supabase/tests/rls.test.sql`
 
-```bash
-supabase init          # creates supabase/config.toml
-supabase start         # boots Postgres/Auth/Realtime/Studio in Docker; prints local URLs + keys
+Found by reading. All three would fail on Docker too — the suite has never been runnable.
+
+- **Missing `auth.users` row (hard failure).** `members.user_id` has an FK to
+  `auth.users(id)`, but the fixture inserts `user_id = '…f1'` with no such user. Insert it
+  first: `insert into auth.users (id, email) values ('…f1', 'linked-adult@test.invalid');`
+  — every other `auth.users` column is nullable or defaulted. The address must match no
+  `invited_email` so `on_auth_user_created` stays a no-op; in particular **not**
+  `deshen.padayachee@rokkit200.co` from the seed. The negative-case subject `…e0` is only
+  ever a JWT claim, never a row, so it needs nothing.
+- **Untyped `null` in a polymorphic assertion.** `is(public.current_household_id(), null, …)`
+  can't resolve pgTAP's `anyelement`. Cast to `null::uuid`; same for the `null` errmsg
+  argument in both `throws_ok` calls (`null::text`).
+- **Ambiguous `has_function` overload.** The 3-arg call is ambiguous between
+  `(name, name, text)` and `(name, name, name[])` given unknown-type literals. Cast
+  explicitly or drop to the 2-arg form.
+
+`plan(13)` is unchanged — no assertions added or removed.
+
+### 2. Add the remote runner
+
+New `scripts/supabase-remote.mjs` — a thin wrapper, not a framework. It reads
+`SUPABASE_TEST_DB_URL`, exits with a message naming the env var and `.env.example` if unset,
+spawns the CLI with `stdio: 'inherit'`, and propagates the exit code. It **prints the target
+host before running** and never passes `--linked` or `--local`, so the target is always
+explicit and never inherited from CLI state. Subcommand comes from `argv[2]`:
+
+- `test` → `supabase test db --db-url <url>`
+- `reset` → `supabase db reset --db-url <url>`
+- `reset:noseed` → `supabase db reset --db-url <url> --no-seed`
+- `push:dry` → `supabase db push --db-url <url> --dry-run` (inspection only — shows what a
+  history-tracked push *would* do; we don't push)
+
+A Node wrapper rather than inlining `$SUPABASE_TEST_DB_URL` in an npm script, because npm on
+Windows runs scripts through `cmd`, where `$VAR` does not expand.
+
+In `package.json`, keep `"test": "supabase test db"` as the local/Docker path for whenever
+Docker exists, and add:
+
+```
+"test:remote":       "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs test",
+"db:reset:remote":   "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs reset",
+"db:reset:noseed":   "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs reset:noseed",
+"db:push:dry":       "node --env-file-if-exists=.env.local scripts/supabase-remote.mjs push:dry"
 ```
 
-> The local DB is disposable — `supabase db reset` rebuilds it from migrations + `seed.sql`. That command is how the whole feature is verified. The printed anon/service-role keys and API URL are the values that will go in `.env.local` in a later feature; do **not** commit them and do **not** let the service-role key reach any client/Phase-1 code.
+`--env-file-if-exists` needs Node ≥22.9 (local is 22.12). These scripts are local-only and
+deliberately not wired into CI, so the Node 20 pin in `.github/workflows/ci.yml` is untouched.
+Wiring `npm run test` into CI stays a later feature (D-08 names it; nothing here blocks it).
 
-### 2. Create the single init migration (env §5.2)
+### 3. Secrets and guard rails
 
-```bash
-supabase migration new init_foundation_lists
-```
+Add `.env.example` documenting `SUPABASE_TEST_DB_URL` with a commented placeholder and a note
+to use the **Session pooler** string (port 5432) from the dashboard's Connect panel:
+transaction mode (6543) can't run migrations, and the direct `db.<ref>.supabase.co` host is
+IPv6-only on many networks. The password must be percent-encoded, as the CLI requires.
 
-Populate `supabase/migrations/<timestamp>_init_foundation_lists.sql` following the schema doc's migration order (§9). Because prod does not exist yet, this one file may be edited freely until it lands on prod. **Fold the deltas directly into the base DDL** — do not append `ALTER TABLE`s for things known now. Order:
+The real value goes in `.env.local`, ignored by root `.gitignore` (`.env.*` with
+`!.env.example`) and again by `supabase/.gitignore`. Nothing is committed. This workflow needs
+only the Postgres database password — **not** the service-role key, which bypasses RLS and
+must never enter Phase-1 code or the browser.
 
-1. **`households`** — base DDL from schema §3.1, **plus D-01**: add `timezone text not null default 'Africa/Johannesburg'` as a column in the `create table`. No `owner_id`.
-2. **`members`** — base DDL from schema §3.2, **plus** three folded-in additions:
-   - **D-07:** `theme_preference text not null default 'system' check (theme_preference in ('system','light','dark'))`
-   - **auth §3.1:** `invited_email text unique check (invited_email is null or invited_email = lower(invited_email))`
-   - Keep `user_id uuid unique references auth.users(id) on delete set null` (nullable — kids have none), `colour text check (colour ~ '^#[0-9a-fA-F]{6}$')`, `is_adult`, `sort_order smallint`, `deactivated_at`.
-3. **`current_household_id()`** — `sql`, `stable`, `security definer`, `set search_path = public, pg_temp`; `revoke all from public` + `grant execute to authenticated`. (§4.1 — `stable` = one call per statement; `search_path` prevents definer hijack; `security definer` avoids the members-policy recursion trap.)
-4. **`lists`** — schema §3.3. `kind text default 'general' check (kind in ('general','grocery'))`; `created_by references members(id)`; `archived_at` for soft delete.
-5. **`list_items`** — schema §3.4, **with D-09 applied**: the ordering column is **`sort_position double precision not null`** (never `position`). Denormalised `household_id`; the `list_items_completion_consistent` CHECK.
-6. **`set_updated_at()`** + `before update` triggers on `members`, `lists`, `list_items`.
-7. **`list_items_set_household()`** (`security definer`, `set search_path`) + `before insert or update of list_id` trigger — derives `household_id` from the parent list, raises if the list is missing. Never trust a client-sent `household_id`.
-8. **Enable RLS** on all four tables *before* policies.
-9. **Policies** (§5) — per-operation, `to authenticated`, keyed on `current_household_id()`:
-   - `households`: SELECT only.
-   - `members`: SELECT (household match); INSERT `with check (household_id = current_household_id() and user_id is null)`; UPDATE with the `user_id is not distinct from (select ...)` guard so linking can't happen client-side. **No delete policy** (deactivate via update).
-   - `lists` / `list_items`: SELECT/INSERT/UPDATE/DELETE, every UPDATE carrying **both** `using` and `with check` (omitting `with check` lets a row be moved out of the household).
-10. **Realtime** (§6): `alter publication supabase_realtime add table public.lists;` and `... public.list_items;`. Replica identity stays default — delete-by-id is sufficient.
+`.env.local` is also where F-03 will put the anon key. Additive keys, same file — F-03 extends
+it rather than replacing it.
 
-> The `invited_email` mismatch is intentional and resolved: the base schema doc (§3.2) has no email column; the column and its uniqueness/lowercase constraint come from **auth doc §3.1**, and the `link_member_on_signup()` trigger from **§3.2**. Add both here.
+We do **not** run `supabase link`. Linking writes a project ref into `supabase/.temp` and
+makes `--linked` implicit; with a destructive `db reset` in the toolbox, a stale link is one
+command away from wiping the wrong database. Leaving the link slot empty forces every
+invocation to name its target.
 
-### 3. Add the signup-linking trigger (auth §3.2)
+### 4. Document the path
 
-In the same migration, after `members`: `link_member_on_signup()` — `security definer`, `set search_path`, updates `members.user_id = new.id where invited_email = lower(new.email) and user_id is null`, no exception on no-match (a stranger simply stays unlinked and is denied by RLS). Trigger `on_auth_user_created after insert on auth.users for each row`.
+Short subsection in `project-docs/06-environment-setup.md` (the runbook): create a free dev
+project, copy the session-pooler URL into `.env.local`, `npm run db:reset:remote`,
+`npm run test:remote`. State plainly that this project is disposable and never production,
+that `db reset` wipes whatever it points at, and that the Docker loop (`supabase start` +
+`supabase db reset`) remains available and equivalent once Docker is installed. Mirror the new
+commands into the CLAUDE.md commands block, and amend its "Commands (once scaffolded)" note so
+`supabase start` isn't presented as the only way to get a database.
 
-### 4. Add all indexes (schema §10)
+## Files
 
-`members(household_id)`; partial `members(user_id) where user_id is not null`; partial `lists(household_id) where archived_at is null`; composite `list_items(list_id, is_complete, sort_position)` (**note the D-09 rename in the index too**); `list_items(household_id)`.
+- `supabase/tests/rls.test.sql` — the three fixes
+- `scripts/supabase-remote.mjs` — new
+- `package.json` — four new scripts
+- `.env.example` — new
+- `project-docs/06-environment-setup.md`, `CLAUDE.md` — docs
+- `supabase/migrations/20260818150009_init_foundation_lists.sql`, `supabase/seed.sql` — edited
+  only if the run surfaces a defect, which is likely. Legal: this migration has never reached
+  prod, and `db reset` rebuilds from scratch, so it stays freely editable.
 
-### 5. Write `supabase/seed.sql` (schema §7, D-10)
+Not touched: the CI workflow, anything in `src/`.
 
-- One household, **fixed id** `00000000-0000-0000-0000-000000000001`, name `Dash Fam`, `on conflict (id) do nothing`. Timezone defaults to `Africa/Johannesburg`.
-- **Five members** against that household, `user_id` null for all five. Give each a distinct hex from the five-colour palette (D-06: coral/amber/emerald/azure/violet), `is_adult` true for the two adults, and stable `sort_order`.
-- The **two adults** get `invited_email` set to their real sign-in addresses (write-once, D-10 — never kept in sync afterward; the link persists via `user_id`). Kids leave `invited_email` null.
-- One **grocery list** (`kind = 'grocery'`) so Phase 1 has content on first load.
+## Verification
 
-> No invite/claim flow, no assignee column (D-03 defers `assigned_member_id`). Linking the two adult accounts to `user_id` happens later, once — by the signup trigger on first real sign-in — not in seed.
+Requires one thing I can't do myself — a Supabase dev project and its session-pooler
+connection string. **needs input** at that point; I'll stop and ask rather than guess.
 
-### 6. Verify locally (env §5.2)
+1. `npm run db:push:dry` — lists `20260818150009_init_foundation_lists` as pending and applies
+   nothing. A cheap connectivity and credentials check before anything destructive.
+2. `npm run db:reset:remote` — migration and `seed.sql` apply with **zero errors**. This is the
+   core gate and the first real execution of the DDL: it proves the four tables, both
+   `security definer` functions, every policy, both `alter publication` statements, the trigger
+   on `auth.users`, and the seed's constraint compliance are all valid against real Supabase.
+3. `npm run test:remote` — all 13 pgTAP assertions pass. The load-bearing ones: a user with no
+   member row reads **zero** rows from all four tables; `current_household_id()` is null for
+   them; `members` insert and update refuse to set or change `user_id` (`42501`); and
+   `list_items_set_household()` overwrites a client-sent bogus `household_id`.
+4. Eyeball Studio: one household, five members with `user_id` null, one `grocery` list, RLS
+   badges on all four tables.
+5. `npm run db:reset:noseed` then `npm run test:remote` again — the suite must pass identically
+   on an empty database, proving "zero rows" is a real denial and not an empty table.
+6. `npm run lint`, `npx tsc --noEmit`, `npm run build` stay green.
 
-```bash
-supabase db reset      # rebuilds from the migration + runs seed.sql; must complete with no errors
-```
+The suite is wrapped `begin … rollback`, so a pass or a fail leaves the database as `db reset`
+left it. Between iterations, re-run `db:reset:remote` rather than trying to patch forward.
 
-Open Studio; confirm four tables, RLS badge on each, the seeded household/5 members/grocery list, and that `current_household_id`, `link_member_on_signup`, `set_updated_at`, `list_items_set_household` exist.
+Then commit onto `worktree-f-02-schema` so draft PR #3 carries the verified state, and replace
+the "gate not run" caveat in the PR body with the actual result.
 
-### 7. Add the D-08 negative-case RLS test
+## Definition of done
 
-The one thing that must be tested, not eyeballed — RLS failures are silent. Add a repeatable SQL/pgTAP-style test (runnable against the local stack, wired toward the future `npm run test` CI step) that asserts: **an authenticated user who resolves to no household (`current_household_id()` is null — e.g. a session for an email matching no `invited_email`) reads zero rows from all four tables**, and that the members INSERT/UPDATE policies reject a client attempt to set/change `user_id`. Keep it minimal; the add-item/tick-item critical-path tests can follow with the query/action layer.
+- Migration + seed apply cleanly to a real Supabase Postgres, repeatably.
+- All 13 RLS assertions pass, both seeded and unseeded.
+- The remote loop is documented and reproducible by someone with only the repo and a dev
+  project.
+- `supabase init` is done; **`supabase start` remains unverified** and stays on the checklist
+  for whenever Docker is installed. It is not a gate for this feature.
 
-### 8. Standing constraints to honour while building the schema
+## Risks and follow-ups
 
-- **All domain FKs reference `members.id`, never `auth.users`** (ADR-006). `member_id` never implies an auth user exists.
-- **Linking `user_id` is never a client write** — only the signup trigger sets it; the members policies must block it.
-- **`household_id` on every domain table** from this first migration; on `list_items` it is trigger-maintained, never client-supplied.
-- **RLS is the security boundary** — no household filtering in app code, ever. The service-role key never reaches client/Phase-1 code.
-- **Text + CHECK, not Postgres ENUM.** UUID PKs, `timestamptz` (UTC). Migrations are new files; this init file is editable only until it hits prod.
-- **Enable RLS before writing policies**; verify a member-less authenticated session gets zero rows (not an error) on every table.
-
----
-
-## Critical files created
-
-- `supabase/config.toml` — from `supabase init`.
-- `supabase/migrations/<timestamp>_init_foundation_lists.sql` — the single Phase-1 migration (tables, functions, triggers, RLS, realtime, indexes).
-- `supabase/seed.sql` — household + five members + grocery list.
-- RLS test file (location per the future test setup, e.g. `supabase/tests/rls.test.sql` or a `tests/` harness) — the D-08 negative case.
-- `.plans/F-02-database-schema-rls-seed.md` — this plan.
-
-## Verification (end-to-end)
-
-1. `supabase start` boots the stack cleanly in Docker.
-2. `supabase db reset` applies the migration and `seed.sql` with **zero errors** — this is the core gate.
-3. In Studio: four tables exist, each shows RLS enabled; the seed shows one household, five members (two with `invited_email`, all `user_id` null), one grocery list.
-4. The four functions and their triggers exist; inserting a `list_item` with a bogus client `household_id` still lands in the correct household (trigger overrides it).
-5. The D-08 negative RLS test passes: a no-household authenticated session sees zero rows on all four tables, and `user_id` cannot be set/changed via the members policies.
-6. `npx tsc --noEmit`, `npm run lint`, `npm run build` remain green (no app code changed, but confirm the repo still builds).
-
-## Decided
-
-- **Local-only** for F-02: build and verify entirely on the local Docker stack; creating/linking the prod project and `supabase db push` (env §5.3) are deferred to a later feature.
-- **Single init migration** (`init_foundation_lists`) with D-01/D-07/D-09 and the `invited_email` column + signup trigger folded into the base DDL — not a chain of `ALTER TABLE`s — since no data exists yet.
-- Include the **D-08 negative-case RLS test** now; defer the add/tick critical-path tests to the query/action feature.
+- **Untested SQL will probably fail on first contact.** That's the point — expect several
+  fix-and-reset cycles on the migration and the test file.
+- The `postgres` role owns the tables and so is exempt from their RLS. That's why fixtures
+  insert fine, and why every assertion must `set local role authenticated` first — one that
+  forgets would pass vacuously while looking green. Worth re-reading the suite with that
+  specifically in mind once it passes.
+- `supabase/seed.sql` still carries `TODO(F-02)` placeholders: the second adult's display name
+  and `invited_email` (`adult.two@example.com`), and the three kids' display names. Harmless on
+  a disposable project, but this feature hands the repo a working remote-write command, so a
+  placeholder is now one edited env var away from a production `invited_email` — which is
+  write-once (D-10). **Replace them before any production apply.**
+- GoTrue is not in this loop, so the actual magic-link signup that fires
+  `link_member_on_signup()` is F-03's verification. Here we assert only that the function and
+  trigger exist.
+- Realtime behaviour (subscriber-side RLS) is likewise asserted structurally only — the
+  publication contains both tables. Exercised for real in the Lists feature.
