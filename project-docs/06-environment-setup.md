@@ -99,6 +99,16 @@ supabase start
 
 `supabase start` boots the full stack in Docker and prints local URLs and keys (API URL, anon key, service role key, Studio URL). These are the values for `.env.local` (section 7). The local database is disposable: `supabase db reset` rebuilds it from migrations plus `seed.sql`, which is exactly how the five-member seed (schema section 7) should be verified.
 
+**No Docker yet? Use a throwaway hosted dev project instead (F-02).** The CLI's `db reset`, `db push`, and `test db` all accept `--db-url` and talk straight to a Postgres over the wire, no Docker required. This gives a real Supabase environment (real `auth` schema, roles, `supabase_realtime` publication) without the local container stack:
+
+1. Create a free project in the Supabase dashboard — this project is disposable and is **never** production.
+2. In its dashboard, Connect panel, copy the **Session pooler** string (port 5432; the Transaction pooler on 6543 can't run migrations, and the direct `db.<ref>.supabase.co` host is IPv6-only on many networks). Percent-encode the password.
+3. Copy `.env.example` to `.env.local` and set `SUPABASE_TEST_DB_URL` to that string.
+4. `npm run db:reset:remote` — applies every migration plus `seed.sql` from scratch (destructive; that's the point — see step 5.2 below for reruns).
+5. `npm run test:remote` — runs the pgTAP suite against it.
+
+Do **not** run `supabase link` for this project — an explicit `--db-url` on every command is safer than a stale link sitting one `db reset` away from wiping the wrong database. This path and the Docker loop above are equivalent; once Docker is installed, `supabase start` + `supabase db reset` works the same way against the local stack instead.
+
 ### 5.2 Migrations workflow
 
 The schema doc's SQL and the decisions-log deltas (D-01 timezone, D-07 theme preference, D-09 the `sort_position` name) become migration files, applied in the order schema section 9 sets out.

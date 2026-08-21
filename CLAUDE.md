@@ -2,59 +2,69 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Current state: planning, not built yet
-
-This repo currently contains **only planning documents** under `project-docs/` — there is no application code, no `package.json`, and no `supabase/` directory yet. The design is fully specified and all open decisions are resolved; the next step is scaffolding the app per `project-docs/06-environment-setup.md`. When you start writing code, follow that runbook rather than inventing structure.
-
-The docs are the source of truth. Precedence when they conflict: **`04-decisions-log.md` overrides "Open items" in docs 00–03**, and the seven ADRs (`project-docs/ADRs/`) are the record for the big architectural calls.
-
 ## What Dash Fam is
 
 A private, single-household web app: shared lists, chores, calendar, and meal planning for one family of five (2 adults with logins, 3 kids without). Phone-first PWA, desktop as the planning surface. Shipped in phases — **Phase 1 is Foundation + Lists only** (auth, app shell, lists, thin dashboard). Do not build ahead into chores/calendar/meals; their schemas and ADRs are intentionally deferred until their phase.
 
 Guiding principle: low friction beats feature depth. Adding a list item must take seconds; if it takes more than three taps the app has failed.
 
-## Stack
+## Docs are the source of truth
 
-- **Next.js (App Router)** + **TypeScript strict**, `src/` dir, import alias `@/*`
-- **Supabase** Postgres + Auth (magic link only, PKCE) + Realtime
-- **Tailwind + shadcn/ui** (components added per-screen, not bulk-installed)
-- **npm**, **Vercel** hosting (auto-deploy: `main` → prod, branches → previews)
-- Local dev DB via **Supabase CLI + Docker**
+`project-docs/` is a fully-specified design, not aspirational notes. Read the relevant doc before working in an area. Precedence when they conflict: **`04-decisions-log.md` (the D-NN decisions) overrides "Open items" in docs 00–03**, and the seven ADRs (`project-docs/ADRs/`) are the record for the big architectural calls. `06-environment-setup.md` is the runbook — follow it rather than inventing structure.
 
-## Commands (once scaffolded)
+## Current state
+
+- **F-01 done** — Next.js app scaffolded at the repo root, CI green, auto-deploying to Vercel. Routes exist as stubs that render a marker.
+- **F-02 in progress** on `feature/f-02-supabase-setup-connection`, which now carries both halves: the schema (migration, `seed.sql`, pgTAP RLS suite, merged from `worktree-f-02-schema` / draft PR #3) and the connection wiring (three `src/lib/supabase/*.ts` factories, generated types, `src/middleware.ts`). Plans: `.plans/F-02-database-schema-rls-seed.md` and `.plans/F-02b-supabase-connection.md`.
+- **`src/middleware.ts` refreshes the session only.** No redirects — a logged-out visitor is not yet bounced anywhere. That logic is F-03's.
+- **`/debug/connection` is a temporary dev-only smoke page**, not part of the IA. It proves the round trip end to end and gets deleted in F-03.
+- **F-03 (auth) is next** and is where `src/middleware.ts`, the sign-in flow, and `/auth/callback` get their real logic. The stubs say "lands in F-03" — respect that boundary; don't opportunistically fill them in.
+
+## Commands
 
 ```bash
-npm run dev            # Next dev server
-npm run lint           # ESLint
+npm run dev            # Next dev server (Turbopack)
+npm run lint           # ESLint — but see the caveat below
 npx tsc --noEmit       # typecheck
 npm run build          # production build (also the CI gate)
-npm run test           # RLS + critical-path tests (added under D-08; see Testing)
-
-supabase start         # boot local Postgres/Auth/Realtime in Docker
-supabase db reset      # rebuild local DB from migrations + seed.sql (repeatable)
-supabase migration new <name>   # create a new migration file
-supabase db push       # apply local migrations to the linked prod project
 ```
 
-CI (on PRs) runs `npm run lint`, `npx tsc --noEmit`, `npm run build`, and the tests once they exist. Keep them all green.
+CI (`.github/workflows/ci.yml`, on PRs) runs `npm run lint`, `npx tsc --noEmit`, `npm run build`. Keep all three green. The pgTAP RLS suite is **not** in CI — it needs a live database, so it stays a local gate (see Database below). Wiring D-08's tests into CI arrives with F-03.
 
-## Deploy early
+**Lint caveat:** `npm run lint` is bare `eslint`, which walks the whole tree including the nested git worktree at `.claude/worktrees/f-02-schema/`. Its generated `.next/types/` produces ~180 errors and ~3000 warnings that have nothing to do with your changes. To check your own work, scope it:
 
-Per ADR-003 and the env-setup checklist (step 10), **deploy the empty app to production before building features**, not at the end. Connect GitHub to Vercel and ship the scaffold to a live URL in week one. An app that has never been deployed is not close to being deployable. Every branch gets a preview; `main` is production.
+```bash
+npx eslint "src/**/*.{ts,tsx}"
+```
+
+### Database
+
+Docker is **not installed on this machine**, so the documented `supabase start` local stack is unverified and not the working loop. The F-02 branch instead drives the CLI against a throwaway *hosted* dev project over `--db-url`, via `scripts/supabase-remote.mjs`:
+
+```bash
+npm run db:push:dry        # connectivity check; applies nothing
+npm run db:reset:remote    # replay all migrations + seed.sql from scratch (DESTRUCTIVE)
+npm run db:reset:noseed    # same, without seed.sql
+npm run test:remote        # pgTAP RLS suite
+supabase migration new <name>
+```
+
+These read `SUPABASE_TEST_DB_URL` from `.env.local`. Use `db reset`, not `db push`, while iterating — `db push` records applied versions, so an edit to an already-pushed migration silently doesn't land. We deliberately do **not** run `supabase link`: with a destructive reset in the toolbox, a stale link is one command away from wiping the wrong database, so every invocation must name its target.
 
 ## Architecture rules that span files
 
-These are the load-bearing decisions. Read the referenced doc before working in that area.
+These are the load-bearing decisions.
 
 - **Members vs accounts are separate concepts** (ADR-006, scope §2). A `member` is a person; an `account` is an auth login. Three of five members have no account. **All domain foreign keys reference `members.id`, never `auth.users`.** Never write a query, policy, or FK that assumes a `member_id` implies an auth user exists. This is what lets kids get accounts later without a rewrite.
 - **`household_id` on every domain table** from the first migration (scope §5.2), even with one household. This keeps multi-tenancy a future migration rather than a rewrite. On `list_items` it is **denormalised and maintained by a DB trigger** — never trust the client to send it.
-- **RLS is the security boundary, not app code** (schema `01-schema-foundation-lists.md` §5, env-setup §10). Every table has RLS enabled and per-operation policies keyed to `current_household_id()` (a `security definer` function — see §4.1 of the schema doc for the recursion trap and why `set search_path`/`stable` are mandatory). App code trusts RLS; do not reimplement household filtering in queries. The `members` insert/update policies deliberately block linking `user_id` client-side — that is privilege escalation.
-- **Reads via a thin query layer, writes via Server Actions** (ADR-005). `lib/queries/` holds typed read functions; `lib/actions/` holds all mutations. No Supabase client calls scattered in components. Not an ORM — just a folder of functions that grows with need.
-- **Three Supabase clients, one cookie** (ADR-007, env-setup §6): `lib/supabase/client.ts` (browser + realtime), `server.ts` (server components/actions), `middleware.ts` (session refresh). `src/middleware.ts` only refreshes the session and bounces logged-out users to `/sign-in` — it is not the authorization boundary.
-- **Realtime** (schema §6): lists sync between devices. Optimistic local updates must reconcile with incoming realtime events **by id** to avoid double-apply. Delete payloads carry only the primary key.
+- **RLS is the security boundary, not app code** (schema §5). Every table has RLS enabled and per-operation policies keyed to `current_household_id()` (a `security definer` function — see schema §4.1 for the recursion trap and why `set search_path`/`stable` are mandatory). App code trusts RLS; do not reimplement household filtering in queries. The `members` insert/update policies deliberately block linking `user_id` client-side — that is privilege escalation.
+- **Reads via a thin query layer, writes via Server Actions** (ADR-005). `src/lib/queries/` holds typed read functions; `src/lib/actions/` holds all mutations. No Supabase client calls scattered in components. Not an ORM — just a folder of functions that grows with need.
+- **Three Supabase clients, one cookie** (ADR-007, env-setup §6): `src/lib/supabase/client.ts` (browser + realtime), `server.ts` (server components/actions/route handlers), `middleware.ts` (session refresh). `src/middleware.ts` only refreshes the session and bounces logged-out users to `/sign-in` — it is not the authorization boundary.
+- **Realtime** (schema §6): lists sync between devices, enabled per-table in the migration, never assumed on. Optimistic local updates must reconcile with incoming realtime events **by id** to avoid double-apply. Delete payloads carry only the primary key.
 - **Keep platform-specific (Vercel) APIs out of app code** (ADR-003) so the hosting move stays cheap.
-- The **service role key** bypasses RLS and must never reach the browser or Phase 1 code.
+- The **service role key** bypasses RLS and must never reach the browser or Phase 1 code — and never gets a `NEXT_PUBLIC_` prefix.
+
+Env vars are `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` (see `.env.example`). Supabase's newer `sb_publishable_…` key is a drop-in for the anon key value; keep the documented variable *name* rather than renaming to match whatever a quickstart snippet uses.
 
 ## Auth & access (see `02-auth-flow.md`, ADR-002)
 
@@ -74,21 +84,41 @@ Magic link is the only sign-in method (no passwords, no OAuth), over the PKCE fl
 - Delete strategy: hard-delete `list_items`; soft-delete `lists` (`archived_at`); members are never deleted, only `deactivated_at`.
 - Ordering column is `sort_position` (`double precision`, float-gap reordering) — renamed from `position` per D-09.
 - "Today" uses a **fixed household timezone** (`households.timezone`, `Africa/Johannesburg`, D-01), not UTC or the browser zone.
-- Schema changes are **always a new migration file**, never a manual edit in Studio. Migrations that have hit prod are append-only.
-- **Seed data** (schema §7): one household (fixed id), five members (two with `invited_email` set, `user_id` null until first sign-in), and one grocery list (`kind = 'grocery'`). Verify with `supabase db reset`.
+- Schema changes are **always a new migration file**, never a manual edit in Studio. Migrations that have hit prod are append-only; the init migration is still freely editable because prod does not exist yet.
+- **Seed data** (schema §7): one household (fixed id), five members (two with `invited_email` set, `user_id` null until first sign-in), and one grocery list (`kind = 'grocery'`). `seed.sql` still carries `TODO(F-02)` placeholder names/emails — **replace them before any production apply**, since `invited_email` is write-once.
+- The `postgres` role owns the tables and is exempt from their RLS. Every RLS assertion must `set local role authenticated` first, or it passes vacuously while looking green.
 
 ## Testing (D-08)
 
-Pragmatic, not exhaustive. The one thing that must be tested rather than eyeballed is **RLS**, because its failures are silent. Cover the policies including the **negative case** — a user from no household (and later, from another household) sees zero rows on every table — plus a few critical flows (sign-in resolves to a household, add item, tick item). No pursuit of broad coverage against the September target. Add these as the `npm run test` CI step.
+Pragmatic, not exhaustive. The one thing that must be tested rather than eyeballed is **RLS**, because its failures are silent. Cover the policies including the **negative case** — a user from no household (and later, from another household) sees zero rows on every table — plus a few critical flows (sign-in resolves to a household, add item, tick item). Run the suite against both a seeded and an empty database, so "zero rows" proves a real denial and not an empty table. No pursuit of broad coverage against the September target.
 
 ## Design tokens (see `03-style-guide.md`)
 
-Semantic CSS custom properties on `:root`/`.dark`, consumed via Tailwind — components reference tokens (`--color-primary`), never hex. Primary is violet `#6D48E5`. Member colours come from a constrained five-colour palette (coral/amber/emerald/azure/violet, D-06); two members can't share one, so the picker must show which are taken. Display font Bricolage Grotesque + body Inter via `next/font`. Theme is `system|light|dark` persisted per member (D-07), read **server-side** to avoid a theme flash on load.
+Semantic CSS custom properties on `:root`/`.dark`, consumed via Tailwind — components reference tokens (`--color-primary`), never hex. Primary is violet `#6D48E5`. Member colours come from a constrained five-colour palette (coral/amber/emerald/azure/violet, D-06); two members can't share one, so the picker must show which are taken. Display font Bricolage Grotesque + body Inter via `next/font` (the scaffold still ships create-next-app's Geist — swapped in F-04). Theme is `system|light|dark` persisted per member (D-07), read **server-side** to avoid a theme flash on load.
 
-- **Member colour ring rule** (style guide §3.2): every member dot and avatar carries a hairline ring (`1px inset rgba(0,0,0,.10)` light, `rgba(255,255,255,.15)` dark). This gives each shape its own boundary so the fill colour need not clear the contrast floor on its own — it's the fix for amber, applied uniformly. Centralise it in `MemberAvatar`/`MemberDot`.
+- **Member colour ring rule** (§3.2): every member dot and avatar carries a hairline ring (`1px inset rgba(0,0,0,.10)` light, `rgba(255,255,255,.15)` dark). This gives each shape its own boundary so the fill colour need not clear the contrast floor on its own — it's the fix for amber, applied uniformly. Centralise it in `MemberAvatar`/`MemberDot`.
 - **Avatar initials** (§3.3): white on four members; **near-black on amber** (white on amber is only 2.0:1). This is the one per-colour exception.
 - **Accessibility floor** (§6): tap targets ≥ 44×44px, focus rings always visible (never removed), colour is never the only signal (pair with icon/label/strikethrough), respect `prefers-reduced-motion`.
 
+shadcn/ui components are added **per-screen as needed**, not bulk-installed (ADR-004), into `src/components/ui/`. App-specific composites go in `src/components/dash/`.
+
 ## Routes & phasing (see `05-information-architecture.md`)
 
-Phase 1 ships `/`, `/lists`, `/lists/[listId]`, `/settings`, `/sign-in`, `/auth/callback`, `/no-household`. Nav: bottom tab bar (phone) / side rail (desktop), showing only Home + Lists until later phases land — no disabled "coming soon" tabs. Five is the tab-bar ceiling and the final feature set is exactly five; nothing new goes top-level. The add pattern: inline QuickAdd for list items; Sheet (phone) / Dialog (desktop) for everything else. Every screen handles loading (Skeleton), empty (EmptyState), and error (Sonner toast) states centrally.
+Phase 1 ships exactly `/`, `/lists`, `/lists/[listId]`, `/settings`, `/sign-in`, `/auth/callback`, `/no-household`. Nav: bottom tab bar (phone) / side rail (desktop), showing only Home + Lists until later phases land — no disabled "coming soon" tabs. Five is the tab-bar ceiling and the final feature set is exactly five; nothing new goes top-level. The add pattern: inline QuickAdd for list items; Sheet (phone) / Dialog (desktop) for everything else. Every screen handles loading (Skeleton), empty (EmptyState), and error (Sonner toast) states centrally.
+
+## Working conventions
+
+- **Features are globally-numbered F-NN**, tracked in `project-docs/features/index.md` with the counter in `features/last-id.md`. Phase 1 is F-01…F-07. Never reuse or reset IDs.
+- **Each feature gets a plan** at `.plans/F-NN-slug.md` before implementation, stating scope, explicit out-of-scope, steps, files touched, verification, and definition of done. Read the plan for the feature you're working on; the out-of-scope section is binding.
+- **Branches** are `feature/f-NN-slug`, PR'd to `main`. Commits are conventional and feature-scoped: `feat(f-01): …`, `fix(f-01): …`, `chore: …`.
+- **Deploy early** (ADR-003, env-setup step 10): `main` → production, every branch → a preview. This is already wired; keep it that way.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
