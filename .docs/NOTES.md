@@ -72,7 +72,28 @@ Every table ships with RLS enabled and policies in the same migration that creat
 no policy is a table nobody can read, which fails loudly — that is the intended safety behaviour,
 not a bug to work around by disabling RLS.
 
-## 5. Open items
+## 5. Supabase tooling: agent skills and MCP server
+
+**Decision:** Supabase work leans on the official Supabase agent skills and the Supabase MCP server
+rather than on recalled API details or hand-rolled shell workflows.
+
+- **Agent skills.** Load the `supabase` skill for any Supabase task (database, auth, RLS,
+  `@supabase/ssr` wiring in Next.js, CLI usage, debugging) and
+  `supabase-postgres-best-practices` before writing or changing anything that lives in the
+  database — tables, columns, migrations, RLS policies, indexes, triggers, functions. They are
+  installed with `npx skills add supabase/agent-skills` and are the first stop, not a fallback.
+- **MCP server.** The Supabase MCP server is the preferred way to touch the remote project:
+  `list_tables` before schema changes, `apply_migration` to apply one, `generate_typescript_types`
+  to regenerate [../lib/supabase/types.ts](../lib/supabase/types.ts), `execute_sql` for read-only
+  inspection, and `get_advisors` / `query_logs` when debugging. It removes the need to copy SQL
+  into the dashboard by hand.
+- **Ordering.** Skill first (for the rules), MCP second (to act). Where the MCP server's generic
+  guidance conflicts with this file — most obviously its suggestion to develop against a local
+  stack — this file wins: sections 1 and 2 stand, there is no local Supabase and no Docker.
+- The dashboard SQL editor and `supabase db push --linked` remain valid fallbacks when MCP is not
+  authenticated in the current session.
+
+## 6. Open items
 
 - Data access pattern (Supabase client directly in server components vs a query layer) — still
   undecided per PROJECT.MD section 7. Blocks Phase 1 code.
