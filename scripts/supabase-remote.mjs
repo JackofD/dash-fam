@@ -48,7 +48,9 @@ console.log(`[supabase-remote] target: ${target}`);
 
 // Capture stdout only when we need to redirect it to a file; otherwise let the
 // CLI write straight through so its progress output stays live. stderr is
-// always inherited, so CLI diagnostics surface either way.
+// always inherited, so CLI progress surfaces either way — but note the CLI
+// reports *failures* as JSON on stdout, which is why the non-zero branch below
+// has to replay the captured buffer.
 const result = spawnSync('supabase', spec.args(dbUrl), {
   stdio: spec.outFile ? ['inherit', 'pipe', 'inherit'] : 'inherit',
   shell: true,
@@ -61,6 +63,11 @@ if (result.error) {
 }
 
 if (result.status !== 0) {
+  // In outFile mode stdout is piped, so a CLI error message would be trapped in
+  // the buffer and the command would fail with no explanation. Replay it.
+  if (spec.outFile && result.stdout) {
+    process.stderr.write(result.stdout);
+  }
   process.exit(result.status ?? 1);
 }
 
