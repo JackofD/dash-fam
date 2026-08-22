@@ -10,11 +10,17 @@ Guiding principle: low friction beats feature depth. If adding a list item takes
 
 Read [.docs/PROJECT.MD](.docs/PROJECT.MD) (scope, decisions, phasing) and [.docs/NOTES.md](.docs/NOTES.md) (how things get built) before working in an area. NOTES.md overrides assumptions made anywhere else, including here.
 
-## Current state — this is a fresh starter being rebuilt
+## Current state
 
-Commit `82263e5` ("reset the codebase") wiped the previous app and dropped in the vanilla **Next.js + Supabase starter kit**. Almost everything under [app/](app/) and [components/](components/) is upstream template code, not Dash Fam code: the marketing hero, `deploy-button`, `supabase-logo`, `components/tutorial/*`, the `/protected` demo route, the password-based auth forms. Expect to delete or replace these rather than build around them — and note the template ships **password auth**, while the project has decided on **magic link only** ([.docs/PROJECT.MD](.docs/PROJECT.MD) §5.3).
+Commit `82263e5` ("reset the codebase") wiped the previous app and dropped in the vanilla **Next.js + Supabase starter kit**. F-08 then deleted all of that template's auth and chrome — the marketing hero, `deploy-button`, `supabase-logo`, `components/tutorial/*`, `/protected`, and the password-based auth forms are gone, along with `hasEnvVars`. If you are looking for one of those, it was removed on purpose, not misplaced.
 
-What *is* Dash Fam's own work: [supabase/migrations/](supabase/migrations/), [supabase/seed.sql](supabase/seed.sql), [lib/supabase/types.ts](lib/supabase/types.ts), and the two `.docs/` files. The schema is already applied to the hosted project; the app does not consume it yet.
+Auth is built and is **magic link with a 6-digit code fallback**, no passwords. The route map is `/sign-in`, `/auth/confirm`, `/no-household`, and everything else inside the `app/(app)/` group behind its member gate. See [.plans/F-08-auth-household-access.md](.plans/F-08-auth-household-access.md) for the decisions, including why `verifyOtp` rather than `exchangeCodeForSession` and why `shouldCreateUser` must stay `true`.
+
+`components/ui/*` is Tailwind **v3** flavoured, but the shadcn registry now emits **v4** (`has-[>svg]:`, `var(--spacing)`, `shadow-xs`). Check anything you `shadcn add` before trusting it.
+
+Still template-shaped: `next-themes` theming (vs `members.theme_preference`), and there is no navigation chrome yet.
+
+What is Dash Fam's own work: [supabase/migrations/](supabase/migrations/), [supabase/seed.sql](supabase/seed.sql), [lib/supabase/types.ts](lib/supabase/types.ts), `lib/auth/`, `components/auth/`, and the `.docs/` and `.plans/` files.
 
 Paths are **root-level** (`app/`, `components/`, `lib/`), not `src/`. The `@/*` alias maps to the repo root.
 
@@ -31,10 +37,14 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml), on PRs) runs lint → 
 
 ## Next.js 16 — not the Next.js you know
 
-Installed Next is **16.3.2**. Two consequences that break training-data assumptions:
+Installed Next is **16.3.2**. Consequences that break training-data assumptions:
 
 - **Middleware is `proxy.ts`, not `middleware.ts`.** The root [proxy.ts](proxy.ts) exports `proxy()` plus a `config.matcher`, delegating to [lib/supabase/proxy.ts](lib/supabase/proxy.ts). Creating `middleware.ts` will silently do nothing.
-- **`cacheComponents: true`** in [next.config.ts](next.config.ts) changes caching/streaming semantics for server components.
+- **`cacheComponents: true`** in [next.config.ts](next.config.ts) changes caching/streaming semantics for server components. Three things follow:
+  - `export const dynamic` / `revalidate` / `fetchCache` **error outright**. The escape hatch for a segment that must block is `export const instant = false`.
+  - `instant = false` does **not** defer synchronous IO. `new Date()`, `Math.random()` and friends still fail the prerender; put them behind `connection()` inside a `<Suspense>` boundary.
+  - Reading `cookies()` or `searchParams` inside a `<Suspense>` boundary keeps a route partially prerendered (`◐`) instead of fully dynamic. Prefer that to opting the whole segment out.
+- **Deleting a route leaves stale generated types in `.next`**, and `tsc --noEmit` keeps failing on the old path until you `rm -rf .next tsconfig.tsbuildinfo`. It is not your code that is broken.
 
 When unsure about a Next API, read `node_modules/next/dist/docs/` rather than recalling it. `next dev` may append a `<!-- BEGIN:nextjs-agent-rules -->` block to this file; commit it with your work rather than reverting it.
 
@@ -62,12 +72,13 @@ Load-bearing decisions, mostly enforced in [supabase/migrations/20260818150009_i
 - **Members vs accounts are separate concepts.** A `member` is a person; an account is an auth login. Three of five members have no account. **All domain FKs reference `members.id`, never `auth.users`.** Never write a query, policy or FK that assumes a `member_id` implies an auth user exists — this is what lets kids get accounts later without a rewrite.
 - **`household_id` on every domain table**, even with one household, so multi-tenancy stays a migration rather than a rewrite. On `list_items` it is **denormalised and set by the `list_items_set_household` trigger** — never trust it from the client.
 - **RLS is the security boundary, not app code.** Per-operation policies key off `current_household_id()`, a `security definer stable` function with a fixed `search_path` (all three are mandatory — without them the policies recurse through `members`' own policy). Do not reimplement household filtering in queries.
-- **Account linking is server-side only, by email allowlist.** The `on_auth_user_created` trigger matches a new user's email to a member's `invited_email` and sets `user_id`. The `members` insert/update policies deliberately forbid setting or changing `user_id` from the client — that would be privilege escalation. A user matching no member gets a null household and is denied every row by RLS; surface that as a dedicated screen, not a redirect loop.
+- **Account linking is server-side only, by email allowlist.** The `on_auth_user_created` trigger matches a new user's email to a member's `invited_email` and sets `user_id`. The `members` insert/update policies deliberately forbid setting or changing `user_id` from the client — that would be privilege escalation. A user matching no member gets a null household and is denied every row by RLS; that is the `/no-household` screen, not a redirect loop. Because the trigger only fires on insert, `signInWithOtp` must keep `shouldCreateUser: true` or a seeded member who has never signed in can never link.
+- **Auth guards come in two layers and they are not interchangeable.** [lib/supabase/proxy.ts](lib/supabase/proxy.ts) checks only *is there a session* (no DB read). `app/(app)/layout.tsx` checks *does the session map to a member*, via `requireMember()` in [lib/auth/current-member.ts](lib/auth/current-member.ts). The second is routing, not security — RLS still denies an account that bypasses it. Do not move the membership check into the proxy; it runs on every request.
 - **Realtime is enabled per-table** in the migration (`lists`, `list_items`), never assumed on. Optimistic updates must reconcile incoming events **by id** to avoid double-apply; delete payloads carry only the primary key.
 - **Keep Vercel-specific APIs out of application code** so a hosting move stays cheap.
 - The **service role key** bypasses RLS: it must never reach a client-reachable path and never take a `NEXT_PUBLIC_` prefix.
 
-**Still undecided, and it blocks Phase 1 code:** the data access pattern — Supabase client directly in server components vs a query/action layer ([.docs/PROJECT.MD](.docs/PROJECT.MD) §7). Decide before scattering client calls through components.
+**Still undecided, and it blocks Phase 1 code:** the data access pattern — Supabase client directly in server components vs a query/action layer ([.docs/PROJECT.MD](.docs/PROJECT.MD) §7). Decide before scattering client calls through components. F-08 deliberately did **not** settle this: `lib/auth/` is the auth helpers auth itself needed and sets no precedent for reads or writes. Whichever way it goes, note that `getCurrentMember` is wrapped in React `cache()` so a layout and its page share one round trip — per-request dedup is the cheapest half of a query layer.
 
 ## Schema conventions
 
@@ -77,11 +88,16 @@ The `postgres` role owns the tables and is exempt from their RLS, so any RLS ass
 
 ## Environment
 
-`.env.local` (never committed) holds `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — note the template uses the **publishable** key variable name; an anon key value works in it. `next dev` runs against the remote project. Vercel holds the same variables per environment, preview and production pointing at the same project for now. `lib/utils.ts` exports a `hasEnvVars` guard that the template uses to no-op the proxy and swap in `EnvVarWarning`; it is tutorial scaffolding and can go once real auth lands.
+`.env.local` (never committed) holds `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — the **publishable** name; an anon key value works in it. `NEXT_PUBLIC_SITE_URL` is optional and only feeds metadata. `next dev` runs against the remote project. Vercel holds the same variables per environment, preview and production pointing at the same project for now.
+
+These are validated in [lib/supabase/env.ts](lib/supabase/env.ts), which **throws** on a missing value. That is deliberate: the old `hasEnvVars` guard failed *open*, silently no-opping the proxy so every auth check was skipped. Do not reintroduce a soft fallback.
+
+**Auth also depends on remote dashboard settings that live outside this repo** — custom SMTP (the built-in mailer's few-per-hour cap makes magic-link auth untestable), a Magic Link template carrying both `{{ .TokenHash }}` and `{{ .Token }}`, and the allowed redirect URLs. If sign-in "doesn't work", check those before the code.
 
 ## Working conventions
 
-- Features are globally-numbered **F-NN** and never reused; branches are `feature/f-NN-slug` (current branch is `fix/reboot-this-whole-project`), PR'd to `main`. Commits are conventional and feature-scoped: `feat(f-02): …`.
-- Each feature gets a plan in [.plans/](.plans/) before implementation; its out-of-scope section is binding. The folder is currently empty after the reset.
+- Features are globally-numbered **F-NN** and never reused; branches are `feature/f-NN-slug`, PR'd to `main`. Commits are conventional and feature-scoped: `feat(f-08): …`. **Highest allocated is F-08** (auth); F-03..F-07 were allocated before the reset and their numbers are spent.
+- Each feature gets a plan in [.plans/](.plans/) before implementation; its out-of-scope section is binding.
 - `main` → production, every branch → a Vercel preview. Deploy early.
-- shadcn/ui (`new-york`, neutral base, CSS variables) is configured in [components.json](components.json); add components per-screen as needed rather than bulk-installing. Components reference semantic tokens, never hex.
+- shadcn/ui (`new-york`, neutral base, CSS variables) is configured in [components.json](components.json); add components per-screen as needed rather than bulk-installing. Components reference semantic tokens, never hex. **The registry emits Tailwind v4 and this project is on v3** — read what it generates before keeping it.
+- `eslint .` covers the whole repo; nested `.next` directories inside git worktrees are ignored in [eslint.config.mjs](eslint.config.mjs) because they otherwise bury real findings under thousands of generated-file errors.
