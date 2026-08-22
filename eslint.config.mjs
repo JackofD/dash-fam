@@ -10,6 +10,12 @@ const compat = new FlatCompat({
 });
 
 const eslintConfig = [
+  {
+    // Build output and Claude Code local state. `.next` at the repo root is
+    // ignored by default, but nested copies inside git worktrees are not, and
+    // they bury real findings under thousands of generated-file errors.
+    ignores: [".claude/**", ".agents/**", "**/.next/**"],
+  },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
 ];
 
