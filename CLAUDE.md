@@ -16,9 +16,9 @@ Commit `82263e5` ("reset the codebase") wiped the previous app and dropped in th
 
 Auth is built and is **magic link with a 6-digit code fallback**, no passwords. The route map is `/sign-in`, `/auth/confirm`, `/no-household`, and everything else inside the `app/(app)/` group behind its member gate. See [.plans/F-08-auth-household-access.md](.plans/F-08-auth-household-access.md) for the decisions, including why `verifyOtp` rather than `exchangeCodeForSession` and why `shouldCreateUser` must stay `true`.
 
-`components/ui/*` is Tailwind **v3** flavoured, but the shadcn registry now emits **v4** (`has-[>svg]:`, `var(--spacing)`, `shadow-xs`). Check anything you `shadcn add` before trusting it.
+Styling is **Tailwind v4**, matching what the shadcn registry now emits, so `shadcn add` output can be trusted as-is. There is **no `tailwind.config.ts`** — the theme lives in `@theme inline` in [app/globals.css](app/globals.css). See the Styling section below.
 
-Still template-shaped: `next-themes` theming (vs `members.theme_preference`), and there is no navigation chrome yet.
+Still template-shaped: `next-themes` theming (vs `members.theme_preference`), `components/theme-switcher.tsx` is currently orphaned pending the app shell, and there is no navigation chrome yet.
 
 What is Dash Fam's own work: [supabase/migrations/](supabase/migrations/), [supabase/seed.sql](supabase/seed.sql), [lib/supabase/types.ts](lib/supabase/types.ts), `lib/auth/`, `components/auth/`, and the `.docs/` and `.plans/` files.
 
@@ -47,6 +47,20 @@ Installed Next is **16.3.2**. Consequences that break training-data assumptions:
 - **Deleting a route leaves stale generated types in `.next`**, and `tsc --noEmit` keeps failing on the old path until you `rm -rf .next tsconfig.tsbuildinfo`. It is not your code that is broken.
 
 When unsure about a Next API, read `node_modules/next/dist/docs/` rather than recalling it. `next dev` may append a `<!-- BEGIN:nextjs-agent-rules -->` block to this file; commit it with your work rather than reverting it.
+
+## Styling: Tailwind v4, CSS-first
+
+**There is no `tailwind.config.ts` and adding one back is wrong.** Tailwind 4 configures itself from CSS, and everything lives in [app/globals.css](app/globals.css):
+
+- `@import "tailwindcss"` replaces the three `@tailwind` directives.
+- `@custom-variant dark (&:is(.dark *))` is **required** — v4 defaults `dark:` to `prefers-color-scheme`, but `next-themes` toggles a `.dark` class. Without this line every `dark:` utility silently targets the wrong thing.
+- `:root` / `.dark` hold the palette as **complete colours** (`hsl(0 0% 100%)`), not the bare triplets v3 used. `@theme inline` maps them to `--color-*`, which is what generates `bg-background` and friends. `inline` matters: it makes the utilities reference the custom properties, so `.dark` reassigning them just works.
+- Animations come from `tw-animate-css` (imported in the CSS), **not** `tailwindcss-animate` (a v3 plugin, removed).
+- `autoprefixer` is gone; `@tailwindcss/postcss` handles prefixing. [postcss.config.mjs](postcss.config.mjs) lists only that one plugin.
+
+To add a colour, add the variable to both `:root` and `.dark` **and** map it in `@theme inline` — a variable with no mapping generates no utility, and fails silently rather than loudly.
+
+Verifying styles actually work needs more than a green build: v4 emits nothing for an unmapped token without erroring. Check the served CSS. Note that selectors escape `@`, `/`, `[`, `]` (`.\@container\/card-header`), so grep for the CSS property (`inline-size`) rather than the class name.
 
 ## Database: remote only, no Docker
 
@@ -99,5 +113,15 @@ These are validated in [lib/supabase/env.ts](lib/supabase/env.ts), which **throw
 - Features are globally-numbered **F-NN** and never reused; branches are `feature/f-NN-slug`, PR'd to `main`. Commits are conventional and feature-scoped: `feat(f-08): …`. **Highest allocated is F-08** (auth); F-03..F-07 were allocated before the reset and their numbers are spent.
 - Each feature gets a plan in [.plans/](.plans/) before implementation; its out-of-scope section is binding.
 - `main` → production, every branch → a Vercel preview. Deploy early.
-- shadcn/ui (`new-york`, neutral base, CSS variables) is configured in [components.json](components.json); add components per-screen as needed rather than bulk-installing. Components reference semantic tokens, never hex. **The registry emits Tailwind v4 and this project is on v3** — read what it generates before keeping it.
+- shadcn/ui (`new-york`, neutral base, CSS variables) is configured in [components.json](components.json); add components per-screen as needed rather than bulk-installing. Components reference semantic tokens, never hex.
 - `eslint .` covers the whole repo; nested `.next` directories inside git worktrees are ignored in [eslint.config.mjs](eslint.config.mjs) because they otherwise bury real findings under thousands of generated-file errors.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
